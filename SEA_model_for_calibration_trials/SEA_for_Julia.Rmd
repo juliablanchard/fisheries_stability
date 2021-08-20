@@ -1,0 +1,81 @@
+---
+title: "SEA for Julia"
+author: "camilla novaglio"
+date: "2/09/2021"
+output:
+  html_document:
+    toc: yes
+    fig_width: 10
+    fig_height: 5
+editor_options: 
+  chunk_output_type: console
+---
+
+## Purpose
+
+The purpose of this script is to translate Cami's size-spectrum model based on a modification of Mizer into a Mizer model adn to point out data for Julia's time-variant calibration tests. The model and data used here are from the JAE github repository (data/Mixed_fisheries_tradeoff.RData in runModel.Rmd) and the script is based on the fishmip runs which also had to accommodate differences between Cami's codes and the most recent Mizer.
+
+## Load libraries
+Mizer 2.0.3 or later version is needed to use the extension. 
+
+```{r message = FALSE, warning = FALSE}
+
+rm(list=ls())
+#devtools::install_github("sizespectrum/mizer@*release") # run only once to load the most updated version (@v2.0.3, or @*release)
+library(mizer)
+
+```
+
+## Set up multispecies model 
+
+1. Create new selectivity functions not available in Mizer (or under a different name?)
+2. Get effort, catches, species params, resource spectra info and interaction matrix
+3. Run Mizer model 
+
+```{r message = FALSE, warning = FALSE}
+
+#### 1. Create the selectivity function ----
+
+trawl <- function(w,W25_S,W50_S,...){
+
+  SR <- W50_S - W25_S
+  S1 <- W50_S*log(3)/SR
+  S2 <- S1 / W50_S
+  sel <-1 / (1 + exp(S1 - S2*w))
+  return(sel)
+}
+
+gillnet<-function(w,W50_B,sigma_B,...){
+  sel<-exp(-(w-W50_B)^2/sigma_B^2)
+  return(sel)
+}
+
+#### 2. get effort, catches, species params, resource spectra info and interaction matrix ----
+
+# load effort data - not included in file below as that is mostly on fleet dynamics 
+# load("/Users/camillan/Dropbox/Mizer-fleet_extension/data/SEAmodel_opn3.RData")
+# effort = relative_effort
+# saveRDS(relative_effort, file = "/Users/camillan/Desktop/effort.rds")
+effort <- readRDS("/Users/camillan/Desktop/effort.rds") # fishnig mortality from stock assessments 
+
+# load model
+load("/Users/camillan/R-projects/mixed_fisheries_tradeoff/data/Mixed_fisheries_tradeoff.RData")
+species_params<-sim_fitted@params@species_params # sim_fitted = time variant model (calibrated at equilibrium using mean catches between 1994 and 2004)
+species_params$interaction_resource<- species_params$avail_PP + species_params$avail_BB # 2 resource spectra here merged
+kappa_tot = kappa # + kappa_ben ### NOTE CN: Things don't look good if we add the 2 kappas, possibly because of 1) different allocation of PP and BB to species is not taken into account anymore (see line above) and 2) huge cutoff size for PP as only one among PP and BB can be considered (see line below). 
+# parameters that need changing or have been considered differently: 
+# alpha_g=0.6 for all spp = cost of growing 
+# BB and kappa_BB, w_pp_cutoff, min_w_bb, w_bb_cutoff # benthic resource spectrum 
+
+# catches (from 1994 to 2017)
+catches = yieldObs_timeVariant
+
+#### 3. run Mizer model ----
+
+params<-newMultispeciesParams(species_params, interaction = sim_fitted@params@interaction, no_w=100, kappa = kappa_tot, w_pp_cutoff = w_bb_cutoff)
+sim<-project(params, effort = relative_effort[1,])
+plot(sim) 
+
+# problem: not working when effort = relative_effort
+
+```
