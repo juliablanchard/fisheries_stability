@@ -23,7 +23,11 @@ Mizer 2.0.3 or later version is needed to use the extension.
 rm(list=ls())
 #devtools::install_github("sizespectrum/mizer@*release") # run only once to load the most updated version (@v2.0.3, or @*release)
 library(mizer)
-
+library(mizerHowTo)
+#remotes::install_github("sizespectrum/mizerExperimental")
+library(mizerExperimental)
+#remotes::install_github("sizespectrum/mizerMR")
+library(mizerMR)
 ```
 
 ## Set up multispecies model 
@@ -56,10 +60,10 @@ gillnet<-function(w,W50_B,sigma_B,...){
 # load("/Users/camillan/Dropbox/Mizer-fleet_extension/data/SEAmodel_opn3.RData")
 # effort = relative_effort
 # saveRDS(relative_effort, file = "/Users/camillan/Desktop/effort.rds")
-effort <- readRDS("/Users/camillan/Desktop/effort.rds") # fishnig mortality from stock assessments 
+effort <- readRDS("SEA_model/effort.rds") # fishnig mortality from stock assessments 
 
 # load model
-load("/Users/camillan/R-projects/mixed_fisheries_tradeoff/data/Mixed_fisheries_tradeoff.RData")
+load("SEA_model/Mixed_fisheries_tradeoff.RData")
 species_params<-sim_fitted@params@species_params # sim_fitted = time variant model (calibrated at equilibrium using mean catches between 1994 and 2004)
 species_params$interaction_resource<- species_params$avail_PP + species_params$avail_BB # 2 resource spectra here merged
 kappa_tot = kappa # + kappa_ben ### NOTE CN: Things don't look good if we add the 2 kappas, possibly because of 1) different allocation of PP and BB to species is not taken into account anymore (see line above) and 2) huge cutoff size for PP as only one among PP and BB can be considered (see line below). 
@@ -72,10 +76,63 @@ catches = yieldObs_timeVariant
 
 #### 3. run Mizer model ----
 
-params<-newMultispeciesParams(species_params, interaction = sim_fitted@params@interaction, no_w=100, kappa = kappa_tot, w_pp_cutoff = w_bb_cutoff)
-sim<-project(params, effort = relative_effort[1,])
+params<-newMultispeciesParams(species_params, interaction = sim_fitted@params@interaction, no_w=100, kappa = kappa_tot*1.1, w_pp_cutoff = w_bb_cutoff)
+sim<-project(params, effort = effort[1,])
 plot(sim) 
-
+plotDiet2(sim)
 # problem: not working when effort = relative_effort
+plotlySpectra(sim,power=2)
+sim@params@species_params[,c("erepro","R_max")]
+plotGrowthCurves2(sim,species_panel = T)
+
+
+```
+
+
+Stage 1: Getting the Steady State (following  Gustav's example)
+
+```{r message = FALSE, warning = FALSE}
+
+# start with R_max =  Inf?
+#species_params(params)$R_max<-Inf
+species_params(params)$erepro<-0.01
+
+# or initial Rmax guess 
+species_params(params)$R_max<-params@resource_params$kappa*params@species_params$w_inf^-2
+# have a look
+sim<-project(params,t_max=300,t_save = 0.2,effort = 0.0)
+plotSpectra(sim,power=2)
+plot(sim)
+plotGrowthCurves(sim,species_panel = T)
+plot(sim)
+
+params <- params %>% calibrateBiomass() %>% matchBiomasses() %>% steady()
+names(params@species_params)[29]<-"biomass_observed"
+plotBiomassObservedVsModel(params)
+
+sim2<-project(params,t_max=300,t_save = 0.2,effort = 0.0)
+plotSpectra(sim2,power=2)
+plot(sim2)
+plotGrowthCurves(sim2,species_panel = T)
+plot(sim2)
+
+#params <- tuneParams(params, controls = "predation", tabs = "Growth") - tried this but don't know when to stop. I think better to get the biomass in the right ball park then tweak?
+```
+
+
+Stage 2: Calibrating density dependence
+
+```{r message = FALSE, warning = FALSE}
+
+
+
+
+```
+
+Stage 3: Time series fitting
+```{r message = FALSE, warning = FALSE}
+
+
+
 
 ```
