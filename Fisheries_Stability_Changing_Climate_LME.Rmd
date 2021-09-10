@@ -1,0 +1,581 @@
+---
+title: "Fisheries Stablity under Environmental Change: Early Warning Signals"
+output: html_notebook
+---
+
+Fisheries stability under multiple drivers of change.
+
+Stability is one of the tenets of food security. Also widely used objective for management. Definition of fisheries stability unclear - whether it is the ecological part of the system (stocks) or whole social-ecological system including management (Example?). Improved knowledge of how the dynamics of fisheries systems is needed to inform SDGs, specifically SDG14 (quote stablity).
+
+The main goal of this study is to assess how useful early warning signals from catch data are to inform changes in fisheries stability and/or resilience in the face of environmetal change.
+
+We focus on a climate-change hotspot, Southeast Australian Shelf Large Marine Ecosystem, and analyse whether there exits EWS in catch data time series (SAUP and AFMA).
+
+We then use a  trait-based modelling approach, broadly paramterised for the Southeast Australian Shelf Large Marine Ecosystem (LME 42). 
+
+At a later stage, this work will combine climate scenarios and be extended to all LMEs to investigate links within and across ocean food systems. This work is a contribution to FishMIP, co-funded by Dalhousie University and ARC.
+
+
+```{r}
+library(tidyverse)
+remotes::install_github("sizespectrum/mizerExperimental")
+library(mizerExperimental)
+#library(mizerMR)
+library(mizerHowTo)
+library(tibble)
+library(purrr)
+library(zoo)
+library(Hmisc)
+library(mgcv)
+library(data.table)
+library(tidyverse)
+library(ggpubr)
+library(rvest)
+library(stringr)
+library(magrittr)
+library(Kendall)
+library(boot)
+
+```
+
+Theory - Critical slowing down. Based primarily on simple models although present in many types of data. What does this mean for fished ecosystems (social-ecological systems)?
+
+PART 1. Data
+
+Question 1) What does EWS analysis of catches show?
+
+```{r}
+# Read in SAUP catches instead
+SAUPcatches<-read.csv("../data/SAU LME 42 v48-0/SAU LME 42 v48-0.csv")
+
+head(SAUPcatches)
+
+# also from SAUP for this LME:
+#LME area	1,177,870 km2
+#Shelf Area	219,772 km2
+#Inshore Fishing Area (IFA)	194,195 km2
+#Tropical Coral Reefs	0 % of world
+#Seamounts	0.168 % of world
+#Primary production	514.76 mgCm-2day-1
+
+catch_sum2<-aggregate(SAUPcatches$tonnes,list(SAUPcatches$year,SAUPcatches$functional_group),sum)
+names(catch_sum2)<-c("year","functional_group","tonnes")
+
+# Plot
+ggplot(catch_sum2, aes(year, y=tonnes, fill=functional_group )) + geom_area() 
+
+# check relative dominances of FGs in one year
+c2010<-catch_sum2[catch_sum2$year==2010,]
+c2010[order(c2010$tonnes,decreasing = T),]
+
+# extract only fishMIP FGs
+
+unique(catch_sum2$functional_group)
+#unique(effort_sum$FGroup)
+
+#unique(effort_sum$FGroup)
+#[1] "demersal<30cm"   "demersal>=90cm"  "demersal30-90cm"
+#[4] "pelagic<30cm"    "pelagic>=90cm"   "pelagic30-90cm" 
+
+fishmip_groups<-c("Small demersals (<30 cm)","Medium demersals (30 - 89 cm)", 
+"Large demersals (>=90 cm)", 
+"Small pelagics (<30 cm)",
+"Medium pelagics (30 - 89 cm)",
+"Large pelagics (>=90 cm)")
+
+catch<-filter(catch_sum2, functional_group %in% fishmip_groups)
+names(catch)[3]<-"value"
+# Plot
+ggplot(catch, aes(year, y=value, fill=functional_group )) + geom_area() 
+
+```
+
+Function to run the EWS metrics.
+
+```{r}
+runEWS<-function(results=results) {
+ window <- c(0.3, 0.4,0.5, 0.6,0.7)
+
+for(i in window){
+  
+  assign(paste0("window", i), 
+    results %>%
+    group_by(year) %>% 
+    summarise(value=sum(value)) %>%
+    mutate(Normalized_value = (value - mean(value))/sd(value)) %>% 
+    mutate(log_Value = log10(value)) %>% 
+    #mutate(Element="Fisheries") %>% 
+    mutate(Differenced = (resid(gam(value~s(year))))) %>% #diag(1:4)
+  #  mutate(Differenced = c(0, diff(value))) %>% ### fit a gam value smoothed by year and then get residuals and then run everything below, call it Difference
+    mutate(Variance = rollapply(data = Differenced, 
+                                width = i*length(Differenced), 
+                                FUN = sd, 
+                                align = "right", 
+                                fill = NA, 
+                                na.rm = T)) %>% 
+    mutate(Mean = rollapply(data = Differenced, 
+                            width = i*length(Differenced), 
+                            FUN = mean, 
+                            align = "right", 
+                            fill = NA, 
+                            na.rm = T)) %>%
+   # mutate(CV=Variance/Mean) %>%
+    mutate(AR1 = rollapply(data = (Differenced), 
+                           width = i*length(Differenced), 
+                           FUN = function(z,  na.rm = FALSE){
+                             return(acf(z, plot=FALSE)$acf[2])
+                           },  
+                           align = "right", 
+                           fill = NA, 
+                           na.rm = T)) %>% 
+    mutate(Return_rate = rollapply(data=Differenced,
+                                   width= i*length(Differenced),
+                                   FUN = function(z, na.rm=FALSE){
+                                     ar1 <- ar.ols(z,demean=FALSE, order.max = 1, aic = FALSE, intercept = FALSE)
+                                     return(return_rate = 1/ar1$ar[1])
+                                   },
+                                   align = "right", 
+                                   fill = NA, 
+                                   na.rm = T)) %>% 
+    mutate(Kurtosis = rollapply(data=Differenced,
+                                   width=i*length(Differenced),
+                                   FUN = moments::kurtosis,
+                                   align = "right", 
+                                   fill = NA, 
+                                   na.rm = T)) %>% 
+    mutate(Skewness = rollapply(data=Differenced,
+                                   width=i*length(Differenced),
+                                   FUN = moments::skewness,
+                                   align = "right", 
+                                   fill = NA, 
+                                   na.rm = T)) %>% 
+    mutate(Width = i)%>% 
+
+    # still good. used to create a composite metric    
+    mutate(Diff_AR1= rollapply(data = Differenced, 
+                           width =i* length(Differenced), 
+                           FUN = function(z,  na.rm = FALSE){
+                             return(acf(z, plot=FALSE)$acf[2])
+                           },  
+                           align = "right", 
+                           fill = NA, 
+                           na.rm = T)))
+  
+}
+
+#fisheries <- bind_rows(window0.3, window0.4, window0.5, window0.6,window0.7)
+fisheries <- bind_rows(window0.3, window0.4, window0.5, window0.6,window0.7)
+
+fisheries
+}
+
+fisheries<-runEWS(results=catch)
+
+
+```
+
+
+Plot the times series of the data.
+
+```{r}
+plot_EWS<-function(fisheries=fisheries,start=1950,end=2020){
+
+landings <- ggplot(fisheries %>% filter(Width ==0.5), aes(x=year)) +
+geom_line(aes(y=value), colour="#172869", size=1.1)+
+theme_pubr()+ 
+theme(text = element_text(size=6),axis.title.x = element_blank())+
+scale_x_continuous(breaks=c(start,(start+end)/2,end), labels = c(start,(start+end)/2,end), limits = c(start,end))+
+labs(y=bquote(Tonnes))
+
+
+residuals <- ggplot(fisheries %>% filter(Width ==0.5),
+       aes(x=year)) +
+geom_line(aes(y=Differenced), colour="#EA7580", size=1.1)+
+theme_pubr()+
+theme(text = element_text(size=6),axis.title.x = element_blank())+
+scale_x_continuous(breaks=c(start,(start+end)/2,end), labels = c(start,(start+end)/2,end), limits = c(start,end))+geom_hline(yintercept = 0, linetype=1, colour="grey90", size=0.75)+
+labs(y=bquote(Tonnes))
+
+    
+variance_ts <- fisheries$Variance[!is.na(fisheries$Variance)]
+
+# trend in Variance - positive then increase in variance
+ (variance_tau <- Kendall(1:length(variance_ts), variance_ts)$tau[1])
+
+ tau.fc<-function(x,y){
+    y<-sample(x, replace = T)
+   tau<-as.numeric(Kendall(1:length(y), y)$tau)
+   return(tau)
+ }
+
+#reliability investigation into trend test
+
+  vars <- ggplot(data=fisheries, aes(x=year, y=Variance))+
+    geom_line()+
+    facet_grid(.~Width)+
+    theme_pubr()+
+      theme(
+        text = element_text(size=6),
+        axis.title.x = element_blank()
+      )+
+      scale_x_continuous(breaks=c(start,(start+end)/2,end), labels = c(start,(start+end)/2,end), limits = c(start,end))+
+      labs(y=bquote(Variance~(T)))
+    
+  
+  ar1 <- ggplot(data=fisheries, aes(x=year, y=AR1))+
+    geom_line()+
+    facet_grid(.~Width)+
+    theme_pubr()+
+      theme(
+        text = element_text(size=6),
+        axis.title.x = element_blank()
+      )+
+   scale_x_continuous(breaks=c(start,(start+end)/2,end), labels = c(start,(start+end)/2,end), limits = c(start,end))+
+      labs(y="AR1", x="Year")
+  
+  # add compposite metrics form Chris's paper:
+  
+  comp_fisheries <- fisheries %>% 
+    drop_na() %>% 
+    group_by(Width) %>% 
+    nest() %>% 
+    mutate(Normalised_variance = map(data, ~((.$Variance-mean(.$Variance))/sd(.$Variance))),
+           Normalised_AR = map(data, ~((.$AR1-mean(.$AR1))/sd(.$AR1)))) %>% 
+    unnest(cols = c(data, Normalised_variance, Normalised_AR)) %>% 
+    mutate(Composite_index = Normalised_variance+Normalised_AR)
+  
+  
+   comp_index <- ggplot(data=comp_fisheries, aes(x=year, y=Composite_index))+
+    geom_line()+
+    facet_grid(.~Width)+
+    theme_pubr()+
+      theme(
+        text = element_text(size=6),
+        axis.title.x = element_blank()
+      )+
+     scale_x_continuous(breaks=c(start,(start+end)/2,end), labels = c(start,(start+end)/2,end), limits = c(start,end))+
+      labs(y=bquote(Composite~index))
+   
+   landings_residuals <- ggarrange(landings, residuals, 
+          labels = c("a", "b"),
+          font.label = list(size=9),
+          ncol = 2,
+          nrow = 1)
+          
+   ggarrange(landings_residuals, vars,ar1, comp_index, 
+           nrow=4, ncol=1,
+           labels = c("", "c", "d", "e"),
+           font.label = list(size=4),
+           heights = c(1,0.75,0.75,0.75))
+    
+
+#st_dev <- sd((fisheries %>% #filter(Width==0.5))$Differenced)
+ 
+
+#bds.test((fisheries %>% filter(Width==0.5))$Differenced, eps = c(0.5*st_dev, 0.75*st_dev, 1*st_dev))
+
+
+#fisheries_test <- fisheries %>% filter(Width==0.5)
+#qqnorm((fisheries_test$Differenced[2:68]))
+#qqline(fisheries_test$Differenced[2:68])
+         
+
+          }
+          
+
+plot_EWS(fisheries)
+
+```
+
+
+PART 2: 
+
+Now set up a mizer model with these functional groups. Will add multiple resources (bethic and pelagic) later.
+
+```{r}
+# check if start  from scratch
+speciesParams<-read.csv("../data/fg_params.csv")
+inter<-read.csv("../data/inter.csv")[,-1]
+params <- newMultispeciesParams(speciesParams, kappa = 1e9,inter)
+
+species_params(params)$R_max<-species_params(params)$R_max<-params@resource_params$kappa*params@species_params$w_inf^-1
+species_params(params)$erepro<-0.0001
+species_params(params)$h<-40
+sim<- project(params, t_max = 200, effort = 0)
+plot(sim)
+
+#tuneParams(params) - made adjustments to kappa in tueParams and saved file below:
+
+ # params<-readRDS("../data/params.rds")
+ # sim<- project(params, t_max = 200, effort = 0)
+ # plot(sim)
+
+#tuneGrowth(params)
+#idealy would have calibrated model to catch time series.. do later, for now consider as a general trait-based model.
+
+
+# by default mizer sets up a gear_params object
+params@gear_params
+# when effort is set  to > 0 the fishing gets switched on
+
+# have a look:
+sim_f<- project(params, t_max = 200, effort = 0.2)
+plot(sim_f)
+
+# check yield curves
+#plotFmsy(params)
+plotYieldVsF(params,species="Small.pelagics")
+plotYieldVsF(params,species="Medium.pelagics")
+plotYieldVsF(params,species="Large.pelagics")
+
+
+```
+
+Now set up effort through time
+
+```{r}
+# set up fishing moratlity (here called effort) time series
+years<-1850:2050
+species<-speciesParams$species
+gear<-"knife_edge_gear"
+#effort_input<-matrix(0,nrow=201,ncol=6,dimnames = list(years,species))
+effort_input<-matrix(0,nrow=201,ncol=1,dimnames = list(years,gear))
+row.names(matrix)
+
+# Historical effort (here we use fishing mortality rate, could separate catchabilty and effort later)
+
+# Use double logistic curve (fishing mortality through time), with a descending limb
+# starting from 1850
+
+# f(y) ~ F/(1+ exp(-y0(y-y1))) * F/(1 + exp(-y2(y-y3))
+# where:
+# y1, the year value of the sigmoid's midpoint;
+# F, the curve's maximum value;
+# k, the logistic growth rate or steepness of the curve
+
+c1=0.05
+c2=0.05 # 0.1 fast, 0.03 medium-MSY, 0.01 slow
+yr50a=1980
+yr50b=2005
+Fmax1=1
+Fmax2=1
+effort_input[,"knife_edge_gear"]<-(Fmax1/(1+ exp(-c1*(years-yr50a))))*(Fmax2/(1 + exp(c2*(years-yr50b))))
+#transform
+effort_input<-effort_input/max(effort_input)*0.8
+plot(years,effort_input[,"knife_edge_gear"],typ="l")
+
+simt <- project(params, effort = effort_input,initial_n = sim@n[200,,], initial_npp = sim@n[200,])
+
+# Each species yields through time
+plotYieldGear(simt)
+
+
+
+
+```
+
+We need to set  up a stochastic model to examine the detectibility of EWS indicators. 
+Here we ass environmental red noise (from Gustav's RPubs example). Later we will set up a climate run that takes the mean trend, seasonal and interannual variability (similar to in Romain's final thesis chapter) from plankton and temperature variables.
+
+
+### Adding  noise to the resource through time
+
+We add noise to the resource function. To prepare for random changes in plankton carrying capacity every half year,we create an environment to maintain state between function calls.
+```{r,code_folding = show}
+plankton_state <- new.env(parent = emptyenv())
+plankton_state$time <- 0
+plankton_state$factor <- 1
+plankton_state$phi <- 0
+plankton_state$sigma <- 0.8
+
+resource_semichemostat_noise<-function (params, n, n_pp, n_other, rates, t, dt, resource_rate, resource_capacity, ...) 
+{  plankton_state$time <- plankton_state$time + dt
+   # red noise
+   plankton_state$factor <- plankton_state$factor ^ plankton_state$phi*exp(rnorm(1, 0, plankton_state$sigma))
+   # plankton_state$factor <- exp(runif(1, log(1/2), log(2)))
+    mur <- resource_rate + rates$resource_mort
+    n_steady <- resource_rate * resource_capacity/plankton_state$factor/mur
+   #  n_steady <- resource_rate * resource_capacity/exp(runif(1, log(1/2), log(2)))/mur
+    n_pp_new <- n_steady + (n_pp - n_steady) * exp(-mur * dt)
+    sel <- mur == 0
+    n_pp_new[sel] <- n_pp[sel]
+    n_pp_new
+}
+
+```
+
+Now set up model resource_params and carry out a bunch of stochastic runs 
+```{r}
+
+run_sim<-function(params,num_sims=10,times=1850:2050){
+  
+ species<-params@species_params$species
+
+ #set up  arrays to store outputs 
+ 
+ biomass_array<-array(NA, dim = c(length(times),length(species) ,num_sims), dimnames = list(times, species, 1:num_sims))
+ 
+ yield_array<-array(NA, dim = c(length(times),length(species) ,num_sims), dimnames = list(times, species, 1:num_sims))
+ 
+params_s<-setResource(params,
+  resource_dynamics = "resource_semichemostat_noise")
+   
+for(i  in 1:num_sims) {
+
+simt_s <- project(params_s, effort = effort_input,initial_n = sim@n[200,,], initial_npp = i)
+
+ biomass_array[,,i]<-getBiomass(simt_s)
+ yield_array[,,i]<-getYield(simt_s)
+}
+
+variable<-c(rep("biomass",num_sims*length(times)*length(species)),rep("yield",num_sims*length(times)*length(species)))
+
+result<-rbind(melt(biomass_array),melt(yield_array))
+
+result$variable<-variable
+
+names(result)<-c("year","species","sim","value","variable")
+
+return(result)
+}
+
+results<-run_sim(params)
+
+saveRDS(results,"results_sim.rds")
+
+biomass<- results %>% filter(variable=="biomass",sim==1) %>% group_by(year)  %>%summarise(value=sum(value))
+
+yield<- results %>% filter(variable=="yield",sim==1) %>% group_by(year)  %>%summarise(value=sum(value))
+
+# plot(biomass)
+# plot(yield)
+
+
+# Plot
+ggplot(results[results$variable=="biomass",], aes(year, y=value, color=species )) + geom_line() + facet_wrap(vars(species))
+
+ggplot(results[results$variable=="yield",], aes(year, y=value, color=species )) + geom_line() 
+
+ggplot(results[results$variable=="yield" & results$sim==1,], aes(year, y=value, fill=species )) + geom_area() 
+
+ggplot(results[results$variable=="yield" & results$sim==1,], aes(year, y=value, fill=species )) + geom_area() 
+
+
+```
+
+
+```{r}
+fisheries_mod_bio<-runEWS(results[results$var=="biomass",])
+fisheries_mod_yield<-runEWS(results[results$var=="yield",])
+
+plot_EWS(fisheries_mod_bio,start=1850,end=2050)
+plot_EWS(fisheries_mod_yield,start=1850,end=2050)
+```
+```{r}
+B0<-getBiomass(sim)[1,]
+
+Brel_ref<-melt(sweep(getBiomass(sim),2, B0,"/"))
+
+Brel_ref <- Brel_ref  %>% mutate(collapsed = value < 0.1)
+
+ggplot(Brel_ref, aes(x = time, y = value, fill = collapsed)) +
+  geom_col(position = "identity") +
+  geom_hline(yintercept = 0.1, linetype=1, colour="red", size=0.75) +
+   geom_hline(yintercept = 0.5, linetype=1, colour="dark grey", size=0.75) +
+  scale_fill_manual(values = alpha(c("blue", "red"), .3)) +
+  facet_wrap(vars(sp))+
+  theme_void()
+```
+
+
+What can we say about ecological and fisheries stability using EWS simply based on the catch?
+
+Need to know year of collapse for each run.
+
+Then when transitions detected.
+
+Need to enable noise to be varied above and vary the rate of fishing development ...
+
+
+We can see this causes variability  in the times series - which is what we want.
+
+
+Simply ask is variance rising - and how does biomass and catch look? - and does it decline when management kicks in ? 
+3 scenarios?
+Add polygons for stoch simulations
+
+
+```
+
+
+
+DO WE SEE A PATTER IN THE DATA??
+
+If you detect in the landings when the the biomass collapse happenss but NOT detected in the biomass EWS.
+Biomass indicator - B/B0 - find the parameter that generate the early warning signals???
+What needs to be true for 
+
+May not be a feature of the biological systems but of the social-ecological system of how efficiently we are hunting/fishing....
+
+
+Try plotting this
+
+```{r}
+
+
+```
+
+
+
+## To add later: Multiple resources  - how to set up the reosurce_dynamics here? Or can they only be semi-chemostat?
+```{r}
+# library(mizerMR)
+# library(tibble)
+# resource_params <- tribble(
+#     ~resource,  ~kappa, ~lambda, ~r_pp, ~w_min, ~w_max,
+#  "Resource 1",    1e11,    1.05,   10,   1e-12 ,  NA,
+#  "Resource 2",    1e9,    1.05,   10,   NA ,   100)
+# 
+# 
+# resource_interaction <- matrix(runif(6*2), nrow = 6, ncol = 2)
+# resource_interaction[,1] <-c(1,0.5,1,0.5, 1,0.5)
+# resource_interaction[,2] <-c(0,0.5,0,0.5, 0,0.5)
+# 
+# 
+# params_sMR <- setMultipleResources(params_s, resource_params) 
+# sim_mr <- project(params_sMR, t_max = 200, t_save = 0.2,effort = 0)
+# 
+# plotSpectra(sim_mr)
+
+```
+
+landings <- ggplot(fisheries %>% filter(Width ==0.5),
+       aes(x=year)) +
+    geom_line(aes(y=value), colour="#172869", size=1.1)+
+    theme_pubr()+
+    theme(
+      text = element_text(size=9),
+      axis.title.x = element_blank())+
+      scale_x_continuous(breaks=c(1960,1980,2000,2020), labels = c("1960","1980","2000","2020"), limits = c(1950,2020))+
+    labs(y=bquote(Tonnes))
+
+
+residuals <- ggplot(fisheries %>% filter(Width ==0.5),
+       aes(x=year)) +
+  geom_line(aes(y=Differenced), colour="#EA7580", size=1.1)+
+    theme_pubr()+
+    theme(
+      text = element_text(size=9),
+      axis.title.x = element_blank()
+    )+
+    geom_hline(yintercept = 0, linetype=1, colour="grey90", size=0.75)+
+    scale_x_continuous(breaks=c(1960,1980,2000,2020), labels = c("1960","1980","2000","2020"), limits = c(1950,2020))+
+    labs(y=bquote(Tonnes))
+
+
+
+landings_residuals <- ggarrange(landings, residuals, 
+          labels = c("a", "b"),
+          font.label = list(size=9),
+          ncol = 2,
+          nrow = 1)
